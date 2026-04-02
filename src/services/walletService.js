@@ -3,6 +3,33 @@ const walletRepository = require('../repository/walletRepository');
 const { TransactionStatus } = require('../models/transactionModel');
 
 class WalletService {
+    async createWalletAccount(userIdInput) {
+        const userId = Number(userIdInput);
+        if (!Number.isInteger(userId) || userId <= 0) {
+            return {
+                status: false,
+                message: 'user_id must be a positive integer.',
+                statusCode: 400
+            };
+        }
+
+        return await walletRepository.createWalletAccount(userId);
+    }
+
+    async buildWalletNotFoundResponse(userId, amount, refId) {
+        const wallet = await walletRepository.getBalanceByUserId(userId);
+        if (wallet) return null;
+
+        return {
+            status: TransactionStatus.FAILED,
+            message: `No wallet found for user_id ${userId}.`,
+            external_ref_id: refId,
+            user_id: userId,
+            amount,
+            statusCode: 404
+        };
+    }
+
     buildExistingTransactionResponse(status, userId, amount, refId) {
         const baseResponse = {
             status,
@@ -15,21 +42,21 @@ class WalletService {
             case TransactionStatus.SUCCESS:
                 return {
                     ...baseResponse,
-                    message: 'Giao dịch đã được xử lý thành công trước đó (idempotent).',
+                    message: 'The transaction was previously processed successfully (idempotent).',
                     duplicated: true,
                     statusCode: 200
                 };
             case TransactionStatus.FAILED:
                 return {
                     ...baseResponse,
-                    message: 'Giao dịch trước đó đã thất bại. Vui lòng tạo giao dịch mới với mã tham chiếu khác.',
+                    message: 'The previous transaction has failed. Please create a new transaction with a different reference ID.',
                     can_retry: true,
                     statusCode: 422
                 };
             case TransactionStatus.PENDING:
                 return {
                     ...baseResponse,
-                    message: 'Giao dịch đang được xử lý. Vui lòng kiểm tra lại sau.',
+                    message: 'The transaction is being processed. Please check back later.',
                     statusCode: 202
                 };
             default:
@@ -41,7 +68,14 @@ class WalletService {
      * Xử lý nạp tiền
      */
     async deposit(userId, amount, refId) {
-        // 1. Kiểm tra Idempotency: Giao dịch đã tồn tại chưa?
+
+        // 1. Kiểm tra ví có tồn tại không
+        const walletNotFoundResponse = await this.buildWalletNotFoundResponse(userId, amount, refId);
+        if (walletNotFoundResponse) {
+            return walletNotFoundResponse;
+        }
+
+        // 2. Kiểm tra Idempotency: Giao dịch đã tồn tại chưa?
         const existingTx = await walletRepository.findTransactionByRef(refId);
 
         if (existingTx) {
@@ -57,7 +91,7 @@ class WalletService {
             }
         }
 
-        // 2. Thực hiện nạp tiền
+        // 3. Thực hiện nạp tiền
         return await walletRepository.executeDeposit(userId, amount, refId);
     }
 
@@ -68,7 +102,19 @@ class WalletService {
         console.log(`Fetching balance for user_id: ${userId}`);
         const wallet = await walletRepository.getBalanceByUserId(userId);
         console.log(`Balance retrieved from DB for user_id ${userId}:`, wallet);
-        return wallet ? wallet.balance : 0;
+
+        if (!wallet) {
+            return {
+                status: false,
+                message: `No wallet found for user_id ${userId}.`
+            };
+        }
+
+        return {
+            status: true,
+            user_id: userId,
+            balance: wallet.balance
+        };
     }
 
     /**
@@ -82,11 +128,10 @@ class WalletService {
         const refIds = bankData.map(item => item.ref_id);
         console.log(`Starting reconciliation for ${bankData.length} bank transactions. Ref IDs:`, refIds);
         const dbTransactions = await walletRepository.getAllTransactionsByRefs(refIds);
-        console.log(`--> DB transactions retrieved for reconciliation:`, dbTransactions);
         if (dbTransactions.length === 0) {
             return {
                 status: 'NO_MATCHES',
-                message: 'Không tìm thấy giao dịch ngân hàng phù hợp hoặc không có dữ liệu để đối soát.',
+                message: 'No matching bank transactions found or no data available for reconciliation.',
                 total_checked: bankData.length,
                 matched: 0,
                 discrepancies: []

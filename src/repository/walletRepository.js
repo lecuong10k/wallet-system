@@ -1,6 +1,33 @@
 const pool = require('../config/db');
 const { TransactionStatus } = require('../models/transactionModel');
 class WalletRepository {
+    async createWalletAccount(userId) {
+        try {
+            await pool.execute(
+                'INSERT INTO wallets (user_id, balance) VALUES (?, 0.00)',
+                [userId]
+            );
+
+            return {
+                status: true,
+                message: 'Wallet account created successfully.',
+                user_id: userId,
+                balance: 0,
+                statusCode: 201
+            };
+        } catch (error) {
+            if (error.code === 'ER_DUP_ENTRY') {
+                return {
+                    status: false,
+                    message: `Wallet already exists for user_id ${userId}.`,
+                    user_id: userId,
+                    statusCode: 409
+                };
+            }
+            throw error;
+        }
+    }
+
     // Tìm giao dịch theo mã tham chiếu ngoài (để check trùng)
     async findTransactionByRef(refId) {
         const [rows] = await pool.execute(
@@ -36,10 +63,33 @@ class WalletRepository {
                 [refId, userId, amount, TransactionStatus.PENDING]
             );
 
-            // 2. Cập nhật số dư (Upsert logic)
+            // 2. Kiểm tra ví tồn tại
+            const [walletRows] = await connection.execute(
+                'SELECT user_id FROM wallets WHERE user_id = ? FOR UPDATE',
+                [userId]
+            );
+
+            if (walletRows.length === 0) {
+                await connection.rollback();
+                await connection.execute(
+                    'UPDATE transactions SET status = ? WHERE external_ref_id = ?',
+                    [TransactionStatus.FAILED, refId]
+                );
+                await connection.commit();
+                return {
+                    status: TransactionStatus.FAILED,
+                    message: `No wallet found for user_id ${userId}.`,
+                    external_ref_id: refId,
+                    user_id: userId,
+                    amount,
+                    statusCode: 404
+                };
+            }
+
+            // 3. Cập nhật số dư
             await connection.execute(
-                'INSERT INTO wallets (user_id, balance) VALUES (?, ?) ON DUPLICATE KEY UPDATE balance = balance + ?',
-                [userId, amount, amount]
+                'UPDATE wallets SET balance = balance + ? WHERE user_id = ?',
+                [amount, userId]
             );
 
             await connection.execute(
@@ -66,7 +116,7 @@ class WalletRepository {
                     if (existing.status === TransactionStatus.PENDING) {
                         return {
                             status: TransactionStatus.PENDING,
-                            message: 'Giao dịch đang được xử lý. Vui lòng kiểm tra lại sau.',
+                            message: 'The transaction is being processed. Please check back later.',
                             external_ref_id: refId,
                             user_id: userId,
                             amount,
@@ -77,7 +127,7 @@ class WalletRepository {
                     if (existing.status === TransactionStatus.SUCCESS) {
                         return {
                             status: TransactionStatus.SUCCESS,
-                            message: 'Giao dịch đã được xử lý thành công trước đó (idempotent).',
+                            message: 'The transaction has been successfully processed before (idempotent).',
                             external_ref_id: refId,
                             user_id: userId,
                             amount,
@@ -88,7 +138,7 @@ class WalletRepository {
 
                     return {
                         status: TransactionStatus.FAILED,
-                        message: 'Giao dịch trước đó đã thất bại. Vui lòng tạo giao dịch mới với mã tham chiếu khác.',
+                        message: 'The previous transaction has failed. Please create a new transaction with a different reference ID.',
                         external_ref_id: refId,
                         user_id: userId,
                         amount,
@@ -100,7 +150,7 @@ class WalletRepository {
 
             return {
                 status: TransactionStatus.FAILED,
-                message: 'Giao dịch thất bại do lỗi hệ thống. Vui lòng thử lại sau.',
+                message: 'The transaction failed due to a system error. Please try again later.',
                 external_ref_id: refId,
                 user_id: userId,
                 amount,
