@@ -1,0 +1,26 @@
+services:
+  wallet-db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456a@A
+      MYSQL_DATABASE: wallet_system
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p123456a@A"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  wallet-app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      DB_HOST: wallet-db
+      DB_USER: root
+      DB_PASSWORD: 123456a@A
+      DB_NAME: wallet_system
+    depends_on:
+      wallet-db:
+        condition: service_healthy
